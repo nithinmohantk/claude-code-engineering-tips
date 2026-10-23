@@ -1,7 +1,10 @@
 # Advanced Prompt Engineering for Claude Code: Best Practices for Developers
 
 > **Audience:** Software engineers, tech leads and architects using Claude Code for design, implementation, debugging and refactoring.
+>
 > **Scope:** Model-agnostic techniques that apply to current Claude models in Claude Code (CLI, IDE extensions, desktop and web).
+>
+> **Running example:** *Patient Explorer* — a clinician-facing web app for searching patients and viewing a clinical timeline (encounters, conditions, observations) aggregated from a FHIR R4 server and a legacy Patient Administration System (PAS). Stack: .NET 8 API, React front end, PostgreSQL, Azure.
 
 ---
 
@@ -51,8 +54,8 @@ This is a great project. Please write good, clean code and follow best practices
 
 ```markdown
 # Commands
-- Build: `dotnet build src/Prescribing.sln`
-- Unit tests: `dotnet test tests/Prescribing.UnitTests --no-build`
+- Build: `dotnet build src/PatientExplorer.sln`
+- Unit tests: `dotnet test tests/PatientExplorer.UnitTests --no-build`
 - Single test: `dotnet test --filter "FullyQualifiedName~<TestName>"`
 - Lint/format: `dotnet format --verify-no-changes`
 
@@ -61,7 +64,7 @@ This is a great project. Please write good, clean code and follow best practices
 - FHIR R4 resources are mapped in `src/Infrastructure/Fhir/Mappers/`. Never expose Firely SDK types from `Application`.
 
 # Rules
-- IMPORTANT: Never log patient identifiers (NHI, name, DOB). Use `PatientRef` (hashed) in logs.
+- IMPORTANT: Never log patient identifiers (MRN, name, DOB). Use `PatientRef` (hashed) in logs.
 - All new endpoints require an `[Authorize(Policy = ...)]` attribute and an audit event.
 - Prefer `Result<T>` over exceptions for expected business failures.
 - Run unit tests before declaring a task complete.
@@ -98,36 +101,37 @@ Design a notification system for our app.
 
 ```xml
 <task>
-Propose an architecture for a prescription-status notification capability.
+Propose an architecture for the Patient Explorer clinical timeline capability.
 Do NOT write implementation code. Produce a design for review.
 </task>
 
 <context>
 - Existing services: see `docs/architecture/c4-containers.md` and `src/Services/`.
-- Events already published to Azure Service Bus topic `prescription-events` (schema: `contracts/PrescriptionEvent.v2.json`).
-- Patients opt in to SMS/email via the Consent service (`src/Services/Consent`).
+- Clinical data lives in a FHIR R4 server (Encounter, Condition, Observation) and a legacy PAS exposed via a SOAP adapter (`src/Adapters/LegacyPas`).
+- Clinicians authenticate via Entra ID (OIDC); access to restricted records is governed by the Record Access service (`src/Services/RecordAccess`).
 </context>
 
 <requirements>
 <functional>
-- Notify patients when a prescription is dispensed, cancelled, or ready for collection.
-- Respect consent and channel preference per patient.
+- Search patients by name, date of birth or MRN, and open a single chronological timeline merging FHIR and PAS data.
+- Filter the timeline by resource type and date range; drill into any entry.
+- Honour restricted-record flags; support audited break-glass access.
 </functional>
 <non_functional>
-- 50k notifications/hour peak, p95 end-to-end latency < 60s.
-- At-least-once delivery; no duplicate SMS to the patient (idempotency required).
+- 2,000 concurrent clinicians; p95 timeline load < 1.5s for patients with up to 5,000 entries.
+- Degrade gracefully if the legacy PAS is unavailable (show FHIR data with a visible "partial record" banner).
 - RTO 1h / RPO 5 min. Data residency: Australia East only.
 </non_functional>
 </requirements>
 
 <constraints>
 - Must run on our existing AKS cluster; no new PaaS products without justification.
-- No PHI in notification payload bodies beyond first name and pharmacy name.
+- No patient data cached in the browser beyond the current session; every record view is audited.
 </constraints>
 
 <output_format>
 1. C4 context and container diagrams in Mermaid.
-2. Sequence diagram for the "dispensed" flow, including failure and retry paths.
+2. Sequence diagram for the "open patient timeline" flow, including PAS timeout and partial-result paths.
 3. Two or three alternatives in a trade-off table (security, scalability, resilience, cost, operational complexity).
 4. A recommended option written as an ADR (Context, Decision, Consequences).
 5. Open questions and assumptions you made — list them explicitly, don't bury them.
@@ -141,22 +145,22 @@ Ask for **evaluation against your criteria**, not opinions. Force it to state as
 **Bad Prompt:**
 
 ```text
-Should we use Kafka or RabbitMQ?
+Should we use Elasticsearch or Postgres for patient search?
 ```
 
 **Optimized Prompt:**
 
 ```xml
-<decision>Choose a message broker for inter-service domain events.</decision>
+<decision>Choose the search technology for Patient Explorer's patient search.</decision>
 
-<options>Apache Kafka (Confluent Cloud), RabbitMQ (self-hosted on AKS), Azure Service Bus Premium</options>
+<options>PostgreSQL full-text + trigram (existing database), OpenSearch (self-hosted on AKS), Azure AI Search</options>
 
 <criteria weight="ordered">
-1. Operational burden for a team of 4 platform engineers
-2. Ordering guarantees per aggregate (prescription ID)
-3. Replay capability for 7 days (audit reconstruction)
-4. Cost at ~20M messages/day
-5. Ecosystem fit with .NET 8 and Spring Boot 3
+1. Match quality for names: phonetic, typo-tolerant, hyphenated and multi-part names
+2. Operational burden for a team of 4 platform engineers
+3. Index freshness: new or merged patients searchable within 30s
+4. Cost at 12M patient records and ~200 searches/second peak
+5. Data residency and encryption-at-rest with customer-managed keys
 </criteria>
 
 <instructions>
@@ -187,7 +191,7 @@ Save accepted plans to a file (e.g., `docs/plans/notifications.md`). It survives
 
 ### 3.1 The five constraints every code prompt should carry
 
-1. **Location** — exact file(s), layer, and the pattern to copy (`"follow the structure of src/Api/Endpoints/OrdersEndpoints.cs"`).
+1. **Location** — exact file(s), layer, and the pattern to copy (`"follow the structure of src/Api/Endpoints/ConditionsEndpoints.cs"`).
 2. **Contract** — signatures, inputs/outputs, status codes, schema.
 3. **Conventions** — naming, error-handling model, logging style, libraries allowed/forbidden.
 4. **Security and NFRs** — authz, input validation, secrets, PII handling, performance limits.
@@ -196,23 +200,24 @@ Save accepted plans to a file (e.g., `docs/plans/notifications.md`). It survives
 **Bad Prompt:**
 
 ```text
-Write an API endpoint to get a patient's medications.
+Write an API endpoint to get a patient's observations.
 ```
 
 **Optimized Prompt:**
 
 ```xml
 <task>
-Add GET /api/v1/patients/{patientId}/medications returning the patient's active MedicationRequests.
+Add GET /api/v1/patients/{patientId}/observations returning the patient's vital-sign Observations for the Patient Explorer timeline.
 </task>
 
 <reference_implementation>
-Follow the exact structure and style of `src/Api/Endpoints/AllergiesEndpoints.cs`
-and its handler `src/Application/Allergies/GetAllergiesQueryHandler.cs`.
+Follow the exact structure and style of `src/Api/Endpoints/ConditionsEndpoints.cs`
+and its handler `src/Application/Conditions/GetConditionsQueryHandler.cs`.
 </reference_implementation>
 
 <contract>
-- Response: FHIR R4 Bundle (type=searchset) of MedicationRequest, status=active only.
+- Response: FHIR R4 Bundle (type=searchset) of Observation, category=vital-signs, status final or amended only.
+- Optional `date` range filter (FHIR `ge`/`le` prefixes); results newest first.
 - 200 with empty bundle if none; 404 if patient does not exist; 403 if caller lacks the relationship.
 - Pagination: `_count` (default 20, max 100), opaque continuation token.
 </contract>
@@ -226,12 +231,13 @@ and its handler `src/Application/Allergies/GetAllergiesQueryHandler.cs`.
 <security>
 - Policy `Patient.Read.Clinical`; enforce care-relationship check via `ICareRelationshipService`.
 - Validate `patientId` format; reject `_count` > 100 with 400 (OperationOutcome).
-- Emit audit event `MedicationListViewed` (who, whom, when, purpose-of-use header).
+- Respect restricted-record flags via `IRecordAccessService`; never reveal that a restricted record exists.
+- Emit audit event `ObservationsViewed` (who, whom, when, purpose-of-use header).
 </security>
 
 <definition_of_done>
-- Unit tests for the handler: active-only filter, 404, 403, pagination bounds.
-- `dotnet build` and `dotnet test tests/Prescribing.UnitTests` pass.
+- Unit tests for the handler: status filter, date range, 404, 403, restricted record, pagination bounds.
+- `dotnet build` and `dotnet test tests/PatientExplorer.UnitTests` pass.
 - No new package references.
 </definition_of_done>
 ```
@@ -243,20 +249,21 @@ TDD is the most reliable way to get correct code from an agent because it gives 
 **Bad Prompt:**
 
 ```text
-Implement the dose calculator and add some tests.
+Implement the patient age display and add some tests.
 ```
 
 **Optimized Prompt (three explicit phases):**
 
 ```xml
 <phase_1>
-Write failing unit tests ONLY for `DoseCalculator.CalculatePaediatricDose` in
-`tests/Clinical.UnitTests/DoseCalculatorTests.cs`, covering:
-- weight-based dosing (mg/kg) rounded down to 0.1 mg
-- maximum adult dose cap
-- weight <= 0 or > 150 kg returns a validation failure
-- unit mismatch (g vs mg) handled explicitly
-Do NOT implement the calculator. Run the tests and confirm they fail for the right reason.
+Write failing unit tests ONLY for `PatientAgeFormatter.Format` in
+`tests/PatientExplorer.UnitTests/PatientAgeFormatterTests.cs`, covering the clinical display rules:
+- under 4 weeks → days ("12d"); under 2 years → months ("14m"); otherwise years ("37y")
+- deceased patients show age at death, never current age ("72y (deceased)")
+- partial birth dates (year or year-month only) are displayed as approximate ("~45y")
+- missing or future birth date returns a validation failure, not "0y"
+- calculation uses the patient's local date, not UTC (inject `TimeProvider`)
+Do NOT implement the formatter. Run the tests and confirm they fail for the right reason.
 </phase_1>
 
 <phase_2>
@@ -332,20 +339,20 @@ The app is broken, it's throwing a null reference. Fix it.
 
 ```xml
 <symptom>
-POST /api/v1/prescriptions intermittently returns 500 (≈2% of requests) since release 4.12.0.
+GET /api/v1/patients/{id}/timeline intermittently returns 500 (≈2% of requests) since release 4.12.0.
 </symptom>
 
-<expected>201 Created with the prescription resource.</expected>
+<expected>200 OK with the merged timeline Bundle.</expected>
 
 <evidence>
 Stack trace (trimmed):
-System.NullReferenceException at PrescriptionFactory.Create(...) line 88
-  at CreatePrescriptionHandler.Handle(...) line 41
+System.NullReferenceException at TimelineEntryFactory.FromEncounter(...) line 88
+  at GetTimelineQueryHandler.Handle(...) line 41
 Full log excerpt saved to `scratch/logs/incident-2291.log` — read only the lines with correlationId=7f3a….
 </evidence>
 
 <reproduction>
-Not reproducible locally. Correlates with prescriber records migrated from the legacy system (no `HpiNumber`).
+Not reproducible locally. Correlates with patients whose encounters were migrated from the legacy PAS (no `Encounter.period.start`).
 </reproduction>
 
 <ruled_out>
@@ -430,8 +437,8 @@ Context is the scarcest resource in an agent session. Most hallucinations come f
 
 | Instead of… | Do this |
 |---|---|
-| Pasting a 500-line file | `@src/Services/OrderService.cs` or "read `src/Services/OrderService.cs`" |
-| Pasting the entire schema | "Read the `prescriptions` and `dispense_events` tables in `db/migrations/V42__*.sql`" |
+| Pasting a 500-line file | `@src/Services/PatientSearchService.cs` or "read `src/Services/PatientSearchService.cs`" |
+| Pasting the entire schema | "Read the `patients` and `patient_identifiers` tables in `db/migrations/V42__*.sql`" |
 | Pasting library docs | Give the URL (Claude can fetch it) or a local path to the specific doc page; or connect an MCP server for the source |
 | Describing a UI bug in prose | Paste a screenshot |
 
@@ -524,14 +531,14 @@ This isn't right. Try again.
 
 ```xml
 <feedback>
-The structure of `ConsentEvaluator` is good — keep it.
+The structure of `RecordAccessEvaluator` is good — keep it.
 Two problems:
-1. `Evaluate()` queries the DB once per rule (N+1). Load all consent directives for the patient in one query.
-2. Expired directives are treated as "deny"; they must be treated as "not applicable" so the next rule in precedence applies.
+1. `Evaluate()` queries the DB once per rule (N+1). Load all access grants for the patient in one query.
+2. Expired break-glass grants are treated as "deny"; they must be treated as "not applicable" so the next rule in precedence (e.g., care-team membership) applies.
 </feedback>
 
 <constraints>
-Change only `ConsentEvaluator.cs` and its tests. Add a test that proves fix #2.
+Change only `RecordAccessEvaluator.cs` and its tests. Add a test that proves fix #2.
 </constraints>
 ```
 
@@ -549,11 +556,11 @@ Refactor this module to be cleaner.
 
 ```xml
 <goal>
-Refactor `src/Billing/InvoiceService.cs` (1,200 lines) into cohesive classes by responsibility.
+Refactor `src/Application/Timeline/PatientSummaryService.cs` (1,200 lines) into cohesive classes by responsibility.
 </goal>
 
 <invariants>
-- Public API of `IInvoiceService` must not change.
+- Public API of `IPatientSummaryService` must not change.
 - Behaviour must not change: all existing tests must pass unchanged.
 - No new dependencies.
 </invariants>
@@ -579,11 +586,11 @@ Make this faster.
 
 ```xml
 <problem>
-`GET /reports/dispensing?month=…` has p95 of 8.2s; target is < 1s at current data volume (12M rows).
+`GET /api/v1/patients?name=…&birthdate=…` has p95 of 8.2s; target is < 1s at current data volume (12M patients).
 </problem>
 
 <evidence>
-Query plan attached in `scratch/perf/plan.txt`. App Insights shows 92% of time in `DispensingReportRepository.GetMonthly`.
+Query plan attached in `scratch/perf/plan.txt`. App Insights shows 92% of time in `PatientSearchRepository.Search`.
 </evidence>
 
 <instructions>
